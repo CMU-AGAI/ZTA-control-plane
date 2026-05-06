@@ -1,0 +1,501 @@
+version: '3.8'
+
+# =============================================================================
+# ZTA Multi-Agent Testbed — Phase 1 (A2A+MCP+LangGraph) + Phase 2 (ZTA Sidecars)
+# =============================================================================
+# Architecture:
+#   User → Supervisor → [sidecar] → Domain Agents → [sidecar] → MCP Servers → Backend Services
+#                                                                    ↓
+#                                                         OPA (Policy Decision Point)
+# =============================================================================
+
+services:
+
+  # ===========================================================================
+  # Backend Services (FastAPI + SQLite) — no sidecars, internal only
+  # ===========================================================================
+
+  airline-service:
+    build: { context: ./services/airline, dockerfile: Dockerfile }
+    ports: ["8001:8001"]
+    environment:
+      - PORT=8001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  hotel-service:
+    build: { context: ./services/hotel, dockerfile: Dockerfile }
+    ports: ["8002:8002"]
+    environment:
+      - PORT=8002
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  car-rental-service:
+    build: { context: ./services/car-rental, dockerfile: Dockerfile }
+    ports: ["8003:8003"]
+    environment:
+      - PORT=8003
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  # ===========================================================================
+  # MCP Servers (FastMCP with SSE transport)
+  # ===========================================================================
+
+  airline-mcp:
+    build: { context: ./mcp-servers/airline, dockerfile: Dockerfile }
+    ports: ["8010:8010"]
+    environment:
+      - PORT=8010
+      - AIRLINE_SERVICE_URL=http://airline-service:8001
+      - FASTMCP_ALLOWED_HOSTS=*
+    depends_on:
+      airline-service: { condition: service_healthy }
+    networks: [zta-network]
+
+  hotel-mcp:
+    build: { context: ./mcp-servers/hotel, dockerfile: Dockerfile }
+    ports: ["8011:8011"]
+    environment:
+      - PORT=8011
+      - HOTEL_SERVICE_URL=http://hotel-service:8002
+      - FASTMCP_ALLOWED_HOSTS=*
+    depends_on:
+      hotel-service: { condition: service_healthy }
+    networks: [zta-network]
+
+  car-rental-mcp:
+    build: { context: ./mcp-servers/car-rental, dockerfile: Dockerfile }
+    ports: ["8012:8012"]
+    environment:
+      - PORT=8012
+      - CAR_RENTAL_SERVICE_URL=http://car-rental-service:8003
+      - FASTMCP_ALLOWED_HOSTS=*
+    depends_on:
+      car-rental-service: { condition: service_healthy }
+    networks: [zta-network]
+
+  # ===========================================================================
+  # OPA — Policy Decision Point
+  # ===========================================================================
+
+  opa:
+    image: openpolicyagent/opa:latest
+    ports: ["8181:8181"]
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--set=decision_logs.console=true"
+      - "/policies"
+    volumes:
+      - ./zta-infrastructure/opa/policy.rego:/policies/policy.rego:ro
+    networks: [zta-network]
+
+  # ===========================================================================
+  # ZTA Auth Service — JWT Token Issuer
+  # ===========================================================================
+
+  zta-auth:
+    build: { context: ./services/auth, dockerfile: Dockerfile }
+    ports: ["8180:8180"]
+    environment:
+      - PORT=8180
+      - JWT_SECRET=zta-dev-secret-key-change-in-production-min-32-chars!!
+      - JWT_ISSUER=zta-auth-server
+      - JWT_AUDIENCE=zta-agents
+      - JWT_EXPIRY_HOURS=24
+      - AGENT_SECRET=zta-agent-shared-secret
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8180/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  # ===========================================================================
+  # ZTA Trust Scorer — Continuous trust evaluation (identity + behavioral + LLM-layer)
+  # References: Dimitrakos et al. 2020 (TrustCom); Kim & Lee 2025 (MDPI AppSci
+  # 15:9551); Bicakci et al. 2024 (arXiv:2402.08299); Sun et al. 2025 (IEEE JSAC
+  # 43:2089); He et al. 2025 (arXiv:2506.02546); Liu et al. 2025 (arXiv:2508.19870)
+  # ===========================================================================
+
+  trust-scorer:
+    build: { context: ./services/trust-scorer, dockerfile: Dockerfile }
+    ports: ["8190:8190"]
+    environment:
+      - PORT=8190
+      - JWT_SECRET=zta-dev-secret-key-change-in-production-min-32-chars!!
+      - JWT_ISSUER=zta-auth-server
+      - JWT_AUDIENCE=zta-agents
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      # Weighted-sum component weights (must sum to 1.0)
+      - W_IDENTITY=0.4
+      - W_BEHAVIOR=0.4
+      - W_LLM=0.2
+      # Threshold bands (Kim & Lee 2025): >=80 allow / 60..79 step-up / <60 block
+      - ALLOW_THRESHOLD=80.0
+      - BLOCK_THRESHOLD=60.0
+      # Exponential decay half-life for historical violations (Sun et al. 2025)
+      - DECAY_HALF_LIFE_S=3600
+    depends_on:
+      audit-logger: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8190/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  # ===========================================================================
+  # Federated control-plane services (proposal §1):
+  #   PDP (authz)               = opa             :8181
+  #   Auth gateway              = zta-auth        :8180
+  #   Trust scorer              = trust-scorer    :8190
+  #   Audit logger              = audit-logger    :8195   <-- new
+  #   Revocation dispatcher     = revocation-dispatcher :8196   <-- new
+  #   PDP (behavioral anomaly)  = pdp-behavior    :8197   <-- new (Figure 1, 2nd PDP)
+  # ===========================================================================
+
+  audit-logger:
+    build: { context: ./services/audit-logger, dockerfile: Dockerfile }
+    ports: ["8195:8195"]
+    environment:
+      - PORT=8195
+      - AUDIT_DB_PATH=/data/audit.db
+      - RETENTION_DAYS=30
+    volumes:
+      - audit-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8195/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  revocation-dispatcher:
+    build: { context: ./services/revocation-dispatcher, dockerfile: Dockerfile }
+    ports: ["8196:8196"]
+    environment:
+      - PORT=8196
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - DEFAULT_REVOCATION_TTL_S=86400
+      - DEFAULT_QUARANTINE_TTL_S=3600
+    depends_on:
+      audit-logger: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8196/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  pdp-behavior:
+    build: { context: ./services/pdp-behavior, dockerfile: Dockerfile }
+    ports: ["8197:8197"]
+    environment:
+      - PORT=8197
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - DISPATCHER_URL=http://revocation-dispatcher:8196
+      - SHORT_WINDOW_S=300
+      - LONG_WINDOW_S=3600
+      - DENIAL_RATE_FLOOR=0.30
+      - INJECTION_CLUSTER_K=3
+      - FAN_OUT_F=5
+      - AUTH_FAIL_BURST_K=5
+      - STEP_UP_FLOOR=0.4
+      - BLOCK_FLOOR=0.8
+      # Operator must opt-in; when true, behavior PDP can call dispatcher
+      # to quarantine an agent on a block-band rule firing.
+      - AUTO_QUARANTINE=false
+      - AUTO_QUARANTINE_TTL_S=900
+    depends_on:
+      audit-logger: { condition: service_healthy }
+      revocation-dispatcher: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8197/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [zta-network]
+
+  # ===========================================================================
+  # Worker Agents (A2A + LangGraph + MCP)
+  # ===========================================================================
+
+  airline-agent:
+    build:
+      context: ./agents
+      dockerfile: airline-agent/Dockerfile
+    ports: ["8091:8091"]
+    environment:
+      - PORT=8091
+      - AGENT_ID=airline-agent
+      - AGENT_NAME=Airline Agent
+      - AIRLINE_MCP_URL=http://airline-mcp-sidecar:10000
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ZTA_AUTH_URL=http://zta-auth:8180
+      - ZTA_AGENT_SECRET=zta-agent-shared-secret
+    depends_on: [airline-mcp, zta-auth]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [zta-network]
+
+  hotel-agent:
+    build:
+      context: ./agents
+      dockerfile: hotel-agent/Dockerfile
+    ports: ["8092:8092"]
+    environment:
+      - PORT=8092
+      - AGENT_ID=hotel-agent
+      - AGENT_NAME=Hotel Agent
+      - HOTEL_MCP_URL=http://hotel-mcp-sidecar:10000
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ZTA_AUTH_URL=http://zta-auth:8180
+      - ZTA_AGENT_SECRET=zta-agent-shared-secret
+    depends_on: [hotel-mcp, zta-auth]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [zta-network]
+
+  car-rental-agent:
+    build:
+      context: ./agents
+      dockerfile: car-rental-agent/Dockerfile
+    ports: ["8093:8093"]
+    environment:
+      - PORT=8093
+      - AGENT_ID=car-rental-agent
+      - AGENT_NAME=Car Rental Agent
+      - CAR_RENTAL_MCP_URL=http://car-rental-mcp-sidecar:10000
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ZTA_AUTH_URL=http://zta-auth:8180
+      - ZTA_AGENT_SECRET=zta-agent-shared-secret
+    depends_on: [car-rental-mcp, zta-auth]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [zta-network]
+
+  # ===========================================================================
+  # Supervisor (LangGraph StateGraph + A2A Client)
+  # ===========================================================================
+
+  supervisor:
+    build:
+      context: ./agents
+      dockerfile: supervisor/Dockerfile
+    ports: ["8080:8080"]
+    environment:
+      - PORT=8080
+      - SUPERVISOR_ID=supervisor-agent
+      - SUPERVISOR_NAME=Travel Supervisor
+      - AIRLINE_AGENT_URL=http://airline-agent-sidecar:10000
+      - HOTEL_AGENT_URL=http://hotel-agent-sidecar:10000
+      - CAR_RENTAL_AGENT_URL=http://car-rental-agent-sidecar:10000
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ZTA_AUTH_URL=http://zta-auth:8180
+      - ZTA_AGENT_SECRET=zta-agent-shared-secret
+    depends_on:
+      airline-agent: { condition: service_healthy }
+      hotel-agent: { condition: service_healthy }
+      car-rental-agent: { condition: service_healthy }
+      airline-agent-sidecar: { condition: service_started }
+      hotel-agent-sidecar: { condition: service_started }
+      car-rental-agent-sidecar: { condition: service_started }
+      zta-auth: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [zta-network]
+
+  # ===========================================================================
+  # ZTA Sidecars (.NET YARP — Phase 2)
+  # ===========================================================================
+
+  airline-agent-sidecar:
+    build: { context: ./zta-sidecar, dockerfile: Dockerfile }
+    ports: ["19091:10000"]
+    environment:
+      - UPSTREAM_URL=http://airline-agent:8091
+      - COMPONENT_NAME=airline-agent-sidecar
+      - LISTEN_PORT=10000
+      - OPA_URL=http://opa:8181
+      - TRUST_SCORER_URL=http://trust-scorer:8190
+      - ENABLE_TRUST_SCORER=true
+      - TRUST_SCORER_FAIL_OPEN=false
+      - ALLOWED_SOURCES=supervisor-agent
+      - OPA_FAIL_OPEN=true
+      # Federated control-plane peers
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - REVOCATION_URL=http://revocation-dispatcher:8196
+      - BEHAVIOR_PDP_URL=http://pdp-behavior:8197
+      - ENABLE_AUDIT=true
+      - ENABLE_REVOCATION=true
+      - ENABLE_BEHAVIOR_PDP=true
+      - BEHAVIOR_PDP_FAIL_OPEN=true
+    depends_on: [airline-agent, opa, trust-scorer, audit-logger, revocation-dispatcher, pdp-behavior]
+    networks: [zta-network]
+
+  hotel-agent-sidecar:
+    build: { context: ./zta-sidecar, dockerfile: Dockerfile }
+    ports: ["19092:10000"]
+    environment:
+      - UPSTREAM_URL=http://hotel-agent:8092
+      - COMPONENT_NAME=hotel-agent-sidecar
+      - LISTEN_PORT=10000
+      - OPA_URL=http://opa:8181
+      - TRUST_SCORER_URL=http://trust-scorer:8190
+      - ENABLE_TRUST_SCORER=true
+      - TRUST_SCORER_FAIL_OPEN=false
+      - ALLOWED_SOURCES=supervisor-agent
+      - OPA_FAIL_OPEN=true
+      # Federated control-plane peers
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - REVOCATION_URL=http://revocation-dispatcher:8196
+      - BEHAVIOR_PDP_URL=http://pdp-behavior:8197
+      - ENABLE_AUDIT=true
+      - ENABLE_REVOCATION=true
+      - ENABLE_BEHAVIOR_PDP=true
+      - BEHAVIOR_PDP_FAIL_OPEN=true
+    depends_on: [hotel-agent, opa, trust-scorer, audit-logger, revocation-dispatcher, pdp-behavior]
+    networks: [zta-network]
+
+  car-rental-agent-sidecar:
+    build: { context: ./zta-sidecar, dockerfile: Dockerfile }
+    ports: ["19093:10000"]
+    environment:
+      - UPSTREAM_URL=http://car-rental-agent:8093
+      - COMPONENT_NAME=car-rental-agent-sidecar
+      - LISTEN_PORT=10000
+      - OPA_URL=http://opa:8181
+      - TRUST_SCORER_URL=http://trust-scorer:8190
+      - ENABLE_TRUST_SCORER=true
+      - TRUST_SCORER_FAIL_OPEN=false
+      - ALLOWED_SOURCES=supervisor-agent
+      - OPA_FAIL_OPEN=true
+      # Federated control-plane peers
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - REVOCATION_URL=http://revocation-dispatcher:8196
+      - BEHAVIOR_PDP_URL=http://pdp-behavior:8197
+      - ENABLE_AUDIT=true
+      - ENABLE_REVOCATION=true
+      - ENABLE_BEHAVIOR_PDP=true
+      - BEHAVIOR_PDP_FAIL_OPEN=true
+    depends_on: [car-rental-agent, opa, trust-scorer, audit-logger, revocation-dispatcher, pdp-behavior]
+    networks: [zta-network]
+
+  airline-mcp-sidecar:
+    build: { context: ./zta-sidecar, dockerfile: Dockerfile }
+    ports: ["19010:10000"]
+    environment:
+      - UPSTREAM_URL=http://airline-mcp:8010
+      - COMPONENT_NAME=airline-mcp-sidecar
+      - LISTEN_PORT=10000
+      - OPA_URL=http://opa:8181
+      - TRUST_SCORER_URL=http://trust-scorer:8190
+      - ENABLE_TRUST_SCORER=true
+      - TRUST_SCORER_FAIL_OPEN=false
+      - ALLOWED_SOURCES=airline-agent
+      - OPA_FAIL_OPEN=true
+      # Federated control-plane peers
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - REVOCATION_URL=http://revocation-dispatcher:8196
+      - BEHAVIOR_PDP_URL=http://pdp-behavior:8197
+      - ENABLE_AUDIT=true
+      - ENABLE_REVOCATION=true
+      - ENABLE_BEHAVIOR_PDP=true
+      - BEHAVIOR_PDP_FAIL_OPEN=true
+    depends_on: [airline-mcp, opa, trust-scorer, audit-logger, revocation-dispatcher, pdp-behavior]
+    networks: [zta-network]
+
+  hotel-mcp-sidecar:
+    build: { context: ./zta-sidecar, dockerfile: Dockerfile }
+    ports: ["19011:10000"]
+    environment:
+      - UPSTREAM_URL=http://hotel-mcp:8011
+      - COMPONENT_NAME=hotel-mcp-sidecar
+      - LISTEN_PORT=10000
+      - OPA_URL=http://opa:8181
+      - TRUST_SCORER_URL=http://trust-scorer:8190
+      - ENABLE_TRUST_SCORER=true
+      - TRUST_SCORER_FAIL_OPEN=false
+      - ALLOWED_SOURCES=hotel-agent
+      - OPA_FAIL_OPEN=true
+      # Federated control-plane peers
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - REVOCATION_URL=http://revocation-dispatcher:8196
+      - BEHAVIOR_PDP_URL=http://pdp-behavior:8197
+      - ENABLE_AUDIT=true
+      - ENABLE_REVOCATION=true
+      - ENABLE_BEHAVIOR_PDP=true
+      - BEHAVIOR_PDP_FAIL_OPEN=true
+    depends_on: [hotel-mcp, opa, trust-scorer, audit-logger, revocation-dispatcher, pdp-behavior]
+    networks: [zta-network]
+
+  car-rental-mcp-sidecar:
+    build: { context: ./zta-sidecar, dockerfile: Dockerfile }
+    ports: ["19012:10000"]
+    environment:
+      - UPSTREAM_URL=http://car-rental-mcp:8012
+      - COMPONENT_NAME=car-rental-mcp-sidecar
+      - LISTEN_PORT=10000
+      - OPA_URL=http://opa:8181
+      - TRUST_SCORER_URL=http://trust-scorer:8190
+      - ENABLE_TRUST_SCORER=true
+      - TRUST_SCORER_FAIL_OPEN=false
+      - ALLOWED_SOURCES=car-rental-agent
+      - OPA_FAIL_OPEN=true
+      # Federated control-plane peers
+      - AUDIT_LOGGER_URL=http://audit-logger:8195
+      - REVOCATION_URL=http://revocation-dispatcher:8196
+      - BEHAVIOR_PDP_URL=http://pdp-behavior:8197
+      - ENABLE_AUDIT=true
+      - ENABLE_REVOCATION=true
+      - ENABLE_BEHAVIOR_PDP=true
+      - BEHAVIOR_PDP_FAIL_OPEN=true
+    depends_on: [car-rental-mcp, opa, trust-scorer, audit-logger, revocation-dispatcher, pdp-behavior]
+    networks: [zta-network]
+
+networks:
+  zta-network:
+    driver: bridge
+
+volumes:
+  audit-data: {}

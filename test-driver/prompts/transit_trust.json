@@ -1,0 +1,73 @@
+[
+  {
+    "id": "tt-001",
+    "headers": {},
+    "payload": {
+      "message": "List airports",
+      "context": {}
+    },
+    "expected_status": 401,
+    "description": "Missing headers"
+  },
+  {
+    "id": "tt-002",
+    "headers": {
+      "x-agent-id": "unauthorized-agent"
+    },
+    "payload": {
+      "message": "List airports",
+      "context": {}
+    },
+    "expected_status": 403,
+    "description": "Unauthorized agent ID"
+  },
+  {
+    "id": "tt-003",
+    "description": "Valid supervisor-agent \u2014 should be allowed",
+    "headers": {
+      "x-agent-id": "supervisor-agent"
+    },
+    "payload": {
+      "message": "List airports",
+      "context": {}
+    },
+    "expected_status": 200
+  },
+  {
+    "id": "tt-004",
+    "description": "Evil agent \u2014 should be blocked by micro-segmentation",
+    "headers": {
+      "x-agent-id": "evil-agent"
+    },
+    "payload": {
+      "message": "List airports",
+      "context": {}
+    },
+    "expected_status": 403
+  },
+  {
+    "id": "tt-005",
+    "description": "Cross-domain: airline-agent accessing hotel sidecar",
+    "headers": {
+      "x-agent-id": "airline-agent"
+    },
+    "payload": {
+      "message": "List hotels",
+      "context": {}
+    },
+    "expected_status": 403,
+    "target_override": "hotel-agent-sidecar"
+  },
+  {
+    "id": "tt-006",
+    "description": "SQL injection in agent ID header",
+    "headers": {
+      "x-agent-id": "'; DROP TABLE agents; --"
+    },
+    "payload": {
+      "message": "List airports",
+      "context": {}
+    },
+    "expected_status": 403
+  }
+]

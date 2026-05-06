@@ -1,0 +1,35 @@
+[project]
+name = "zero-trust-control-plane"
+version = "0.1.0"
+description = "ZTA Multi-Agent Testbed with A2A + MCP"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.5.0",
+    "fastapi>=0.104.0",
+    "httpx>=0.25.0",
+    "uvicorn>=0.24.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+agents = [
+    "langchain>=0.2.0",
+    "langchain-groq>=0.1.0",
+    "langgraph>=0.2.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "mcp>=1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agents*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

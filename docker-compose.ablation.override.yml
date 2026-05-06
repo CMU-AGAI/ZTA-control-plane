@@ -1,0 +1,4 @@
+services:
+  airline-agent-sidecar:
+    environment:
+      - ENABLE_OPA=false

@@ -1,0 +1,17 @@
+# =============================================================================
+# OPA Configuration for ZTA Policy Decision Point
+# =============================================================================
+
+decision_logs:
+  console: true
+
+status:
+  console: true
+
+default_decision: /zta/authz/allow
+
+# Labels for identification
+labels:
+  app: zta-pdp
+  environment: testbed
+  version: "1.0.0"

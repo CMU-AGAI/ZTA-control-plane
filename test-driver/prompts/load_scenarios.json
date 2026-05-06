@@ -1,0 +1,40 @@
+[
+  {
+    "id": "lt-001",
+    "description": "Baseline throughput \u2014 10 concurrent, 100 requests",
+    "concurrency": 10,
+    "requests": 100,
+    "expected_success_rate": 0.95
+  },
+  {
+    "id": "lt-002",
+    "description": "Sustained load \u2014 20 concurrent, 500 requests",
+    "concurrency": 20,
+    "requests": 500,
+    "expected_success_rate": 0.9
+  },
+  {
+    "id": "lt-003",
+    "description": "Burst traffic \u2014 50 concurrent, 200 requests",
+    "concurrency": 50,
+    "requests": 200,
+    "expected_success_rate": 0.8
+  },
+  {
+    "id": "lt-004",
+    "description": "Rate limit test \u2014 200 rapid-fire requests in 10 seconds",
+    "concurrency": 200,
+    "requests": 200,
+    "expected_success_rate": 0.5,
+    "note": "WAF rate limiter should trigger 429 for excess requests"
+  },
+  {
+    "id": "lt-005",
+    "description": "Oversized payload \u2014 50KB message body",
+    "concurrency": 1,
+    "requests": 1,
+    "message_size_bytes": 50000,
+    "expected_success_rate": 0.0,
+    "note": "WAF should reject oversized payload"
+  }
+]
