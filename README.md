@@ -428,30 +428,6 @@ docker compose -f docker-compose.zta.yml down -v
 
 The `-v` flag removes the `audit-data` volume.
 
-## Citation
-
-```bibtex
-@misc{ztcp2026,
-  title  = {A Federated Zero Trust Control Plane for Multi-Agent LLM Systems},
-  author = {<authors>},
-  year   = {2026},
-  note   = {Preprint},
-  url    = {https://github.com/<org>/zero-trust-control-plane}
-}
-```
-
-## References
-
-- NIST SP 800-207, *Zero Trust Architecture* (2020)
-- Dimitrakos et al. 2020 (TrustCom) — continuous trust evaluation
-- Kim & Lee 2025 (MDPI Applied Sciences 15:9551) — trust-band thresholds
-- Bicakci et al. 2024 (arXiv:2402.08299) — ZT for distributed AI systems
-- Sun et al. 2025 (IEEE JSAC 43:2089) — cross-agent trust propagation
-- He et al. 2025 (arXiv:2506.02546)
-- Liu et al. 2025 (arXiv:2508.19870)
-- Wu et al. 2023 — AutoGen multi-agent framework
-- Jøsang, *Subjective Logic* (Springer 2016) — the SL fusion operators
-
 ## License
 
 This work is licensed under the Creative Commons Attribution 4.0
