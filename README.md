@@ -454,4 +454,9 @@ The `-v` flag removes the `audit-data` volume.
 
 ## License
 
-MIT. See `LICENSE`.
+This work is licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0). See the `LICENSE` file for the full
+legal code.
+
+© 2026 Serena Gomez, Dr. Mohamed Farag, and the Applied Generative AI
+(AGAI) Group, Carnegie Mellon University.
